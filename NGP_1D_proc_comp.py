@@ -1,10 +1,68 @@
 import numpy as np
+from numpy import dot
 from filterpy.monte_carlo import residual_resample, systematic_resample
 from numpy.linalg import norm
 from numpy.random import randn
 import matplotlib.pyplot as plt
 from numpy.random import uniform
 import scipy.stats
+from filterpy.kalman import KalmanFilter
+from filterpy.common import Q_discrete_white_noise
+
+
+
+def discm(A,B,dt,N,mode):
+    n = np.size(A,0)
+    r = np.size(B,1)
+    Adt = A*dt
+    F = np.eye(n)
+    for i in range(N,0,-1):
+       F = np.eye(n)+(Adt/i).dot(F)
+    if r:
+       Gm = np.eye(n)
+       for i in range(N,0,-1):
+           Gm = np.eye(n)+Adt.dot(Gm)/(i+1)
+       if mode==0:
+          G = dot(Gm,B)*np.sqrt(dt)
+       else:
+          G = Gm
+
+    else:
+       G=np.array([])
+
+    return F,G
+
+def generate_field(smpl, Fd, Gd):
+    x = np.empty([2,smpl])
+    x[:,0] = np.dot(Gd, np.random.randn()).ravel()
+    for i in range(1,smpl):
+        n = np.random.randn(Gd.shape[1])
+        x[:, i] = np.dot(Fd, x[:, i-1]) + np.dot(Gd, n)
+    return x
+
+def model_measurements(fld,smpl,dt,R):
+    q = R  # корень из интенсивности шума измерений [мГал*с^-1]
+    q_d = q/np.sqrt(dt)
+    err = q_d*np.random.randn(1,smpl)
+    return fld+err
+
+def pre_filter(mnt, smpl, Fd, Gd, R):
+    f = KalmanFilter(dim_x=2, dim_z=1)
+    f.x = np.array([0., 0.])
+    f.F = Fd
+    f.H = np.array([[1.,0.]])
+    f.P = np.array([[400., 0.],
+                    [0., 25.]])
+    f.Q = dot(Gd,Gd.T)
+    f.R = R**2
+    x_est = np.empty([2,smpl])
+    P_est = np.empty([2,2,smpl])
+    for i in range(1,smpl+1):
+        f.predict()
+        f.update(mnt[i-1])
+        x_est[:,i-1] = f.x
+        P_est[:,:,i-1] = f.P
+    return x_est, P_est
 
 def create_uniform_particles(x_range, y_range, hdg_range, N):
     particles = np.empty((N, 3))
@@ -130,4 +188,31 @@ def run_pf1(N, iters=18, sensor_std_err=.1,
 from numpy.random import seed
 
 seed(2)
-run_pf1(N=5000, plot_particles=True)
+#run_pf1(N=5000, plot_particles=True)
+ln = 50000
+v = 5
+dt = 1
+smpl = int(ln/v/dt)
+#np.random.seed(seed=None)
+
+sg = 20 #???
+dgdl = 5 * v/1000 # градиент   поля   в   мГал / км   переведенная   через    скорость    в    мГал / с.
+alfa = (dgdl ** 2 / (sg ** 2 * 2)) ** (0.5)
+beta = dgdl/sg
+F = np.array([[0,1],[-(alfa**2+beta**2),-2*alfa]])
+G = np.array([[0],[np.sqrt(4*alfa*(sg**2)*(alfa**2+beta**2))]])
+Fd, Gd = discm(F,G,dt,20,0)
+R = 10
+x = generate_field(smpl, Fd, Gd)
+y = model_measurements(x[0,:],smpl,dt, R)
+x_est, P_est = pre_filter(y.T, smpl, Fd, Gd, R)
+path = np.linspace(0, ln/1000, smpl, endpoint=False)
+plt.figure()
+plt.plot(path, y[0,:],alpha=0.7)
+plt.plot(path, x[0,:])
+plt.plot(path, x_est[0,:],alpha=0.8)
+plt.grid()
+plt.figure()
+plt.plot(path, P_est[0,0,:])
+plt.show()
+
