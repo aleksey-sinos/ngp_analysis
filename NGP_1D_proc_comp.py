@@ -9,6 +9,7 @@ import scipy.stats
 from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 from scipy import interpolate
+from numpy.random import seed
 
 
 def discm(A, B, dt, N, mode):
@@ -33,34 +34,30 @@ def discm(A, B, dt, N, mode):
     return F, G
 
 
-'''def generate_field(smpl, Fd, Gd):
-    fld = np.empty([2, smpl])
-    fld[:, 0] = np.dot(Gd, np.random.randn()).ravel()
-    for i in range(1, smpl):
-        n = np.random.randn(Gd.shape[1])
-        fld[:, i] = np.dot(Fd, fld[:, i - 1]) + np.dot(Gd, n)
-    fld[0,:] = np.linspace(0, 250, smpl, endpoint=False)
-    fld[1,:] = np.zeros(smpl)
-    return fld'''
-
-
 def generate_profile(type, smpl, **kwargs):
     if type == 'linear':
         len = kwargs['len']
         dgdl = kwargs['dgdl']
-        fld = np.empty([2, smpl])
+        fld = np.empty([3, smpl])
         fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
         fld[1, :] = np.linspace(0, len * dgdl, smpl, endpoint=False)
+        fld[2, :] = np.ones(smpl) * dgdl
+
     if type == 'M1':
         pass
     if type == 'M2':
         len = kwargs['len']
         dgdl = kwargs['dgdl']
         sg = kwargs['sg']
-        dl = len / smpl
-        dgds = dgdl * dl  # градиент   поля   в   мГал / м   переведенный   через    псевдоскорость    в    мГал / отсчет.
-        alfa = (dgds ** 2 / (sg ** 2 * 2)) ** 0.5
+        dl = len / smpl  # количество метров на один отсчет [м/отсчет]
+        dgds = dgdl * dl  # градиент поля в [мГал/м] переведенный через [м/отсчет]  в [мГал/отсчет]
+
+        '''alfa = (dgds ** 2 / (sg ** 2 * 2)) ** 0.5
+        beta = dgds / sg'''
+
+        alfa = 0  # (dgds ** 2 / (sg ** 2 * 2)) ** 0.5
         beta = dgds / sg
+
         F = np.array([[0, 1], [-(alfa ** 2 + beta ** 2), -2 * alfa]])
         G = np.array([[0], [np.sqrt(4 * alfa * (sg ** 2) * (alfa ** 2 + beta ** 2))]])
         Fd, Gd = discm(F, G, dt, 20, 0)
@@ -72,22 +69,33 @@ def generate_profile(type, smpl, **kwargs):
             fld[1:3, i] = np.dot(Fd, fld[1:3, i - 1]) + np.dot(Gd, n)
     if type == 'GRDN':
         pass
-    return fld
+    if type == 'sin':
+        len = kwargs['len']
+        p = 1000
+        fld = np.empty([3, smpl])
+        fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
+        fld[1, :] = np.sin(fld[0, :] / p)
+        fld[2, :] = 1 / p * np.cos(fld[0, :] / p)
+
+    f = scipy.interpolate.interp1d(fld[0, :], fld, fill_value='extrapolate')
+    return fld, f
 
 
-def get_map_value(dist):
+'''def get_map_value(dist):
     return f(dist)
 
 
 def get_mnt_value(dist):
-    return m(dist)
+    return m(dist)'''
 
 
 def model_measurements(fld, smpl, dt, R):
     q = R  # корень из интенсивности шума измерений [мГал*с^-1]
     q_d = q / np.sqrt(dt)
-    err = q_d * np.random.randn(1, smpl)
-    return fld + err
+    err = q_d * np.random.randn(smpl)
+    mnt = fld[1, :] + err
+    m = scipy.interpolate.interp1d(fld[0, :], mnt, fill_value='extrapolate')
+    return mnt, m
 
 
 def pre_filter(mnt, smpl, Fd, Gd, R):
@@ -130,9 +138,9 @@ def predict(particles, std):
     particles += randn(N) * std
 
 
-def update(particles, weights, z, R, ns_pos):
+def update(particles, weights, z, R, ns_pos, map):
     # distance = np.linalg.norm(particles[:, 0:2] - landmark, axis=1)
-    map_value = get_map_value(ns_pos - particles)
+    map_value = map(ns_pos - particles)[1]
     weights *= scipy.stats.norm(map_value, R).pdf(z.ravel())
 
     weights += 1.e-300  # avoid round-off to zero
@@ -158,22 +166,13 @@ def resample_from_index(particles, weights, indexes):
     weights.fill(1.0 / len(weights))
 
 
-def run_pf1(N, iters=9000, sensor_std_err=1,
-            do_plot=True, plot_particles=False,
-            xlim=(0, 20), ylim=(0, 20),
-            initial_x=None):
-    plt.figure()
-    plt.plot(path, fld[0, :])
-    plt.plot(path, mnt[0, :], alpha=0.5)
-
-    # create particles and weights
-    if initial_x is not None:
-        particles = create_gaussian_particles(
-            mean=0, std=1000, N=N)
+def run_pf(N, iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err=None,
+           mnt=None, map=None, do_plot=True, plot_particles=False):
+    particles = create_gaussian_particles(mean=0, std=init_err_std, N=N)
 
     weights = np.zeros(N)
     weights.fill(1.)
-    pos = np.array([initial_x])
+    pos = pos
     ns_pos = pos + pos_err
     if plot_particles:
         alpha = .20
@@ -185,18 +184,17 @@ def run_pf1(N, iters=9000, sensor_std_err=1,
                 color='k', s=180, lw=3)
     plt.scatter(ns_pos - np.mean(particles), 0, marker='s', color='r')
     xs = []
-    # robot_pos = np.array([0., 0.])
 
     for i in range(iters):
         pos += v * dt
         ns_pos = pos + pos_err
-        # distance from robot to each landmark
-        zs = get_mnt_value(pos)
+
+        zs = mnt(pos)
 
         predict(particles, std=0.1)
 
         # incorporate measurements
-        update(particles, weights, z=zs, R=sensor_std_err, ns_pos=ns_pos)
+        update(particles, weights, z=zs, R=sensor_std_err, ns_pos=ns_pos, map=map)
 
         # resample if too few effective particles
         if neff(weights) < N / 2:
@@ -207,21 +205,62 @@ def run_pf1(N, iters=9000, sensor_std_err=1,
         xs.append(mu)
         if np.mod(i, 50) == 0:
             if plot_particles:
-                plt.scatter(ns_pos - particles, np.ones([N]) * np.mod(i + 1, 1000) / 50,
+                plt.scatter(ns_pos - particles, np.ones([N]) * 0,
                             color='g', marker=',', s=5, alpha=0.01)
-            p1 = plt.scatter(pos, np.mod(i + 1, 1000) / 50, marker='+',
+            p1 = plt.scatter(pos, 0, marker='+',
                              color='k', s=180, lw=3)
-            p2 = plt.scatter(ns_pos - mu, np.mod(i + 1, 1000) / 50, marker='s', color='r')
+            p2 = plt.scatter(ns_pos - mu, 0, marker='s', color='r')
 
-    xs = np.array(xs)
+    # xs = np.array(xs)
     # plt.plot(xs[:, 0], xs[:, 1])
     plt.legend([p1, p2], ['Actual', 'PF'], loc=4, numpoints=1)
     print('final position error, std:\n\t', mu - pos_err, np.sqrt(var))
     plt.show()
 
 
-from numpy.random import seed
+def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err=1, mnt=None, map=None, do_plot=True):
+    pos = pos
+    ns_pos = pos + pos_err
 
+    f = KalmanFilter(dim_x=1, dim_z=1)
+    f.F = np.array([[1]])
+    f.P = init_err_std ** 2
+    f.Q = 0.01
+    f.R = R ** 2
+    f.x = np.array([[0]])
+    x_est = np.empty([iters])
+    x_est[0] = 0
+    P_est = np.empty([iters])
+    P_est[0] = init_err_std ** 2
+
+    plt.scatter(pos, 0, marker='+', color='k', s=180, lw=3)
+    plt.scatter(ns_pos - x_est[0], 0, marker='s', color='r')
+
+    for i in range(1, iters):
+        pos += v * dt
+        ns_pos = pos + pos_err
+
+        f.H = map(ns_pos - f.x)[2]
+        # f.H = map(pos)[2]
+
+        f.predict()
+        mnt_v = map(ns_pos)[1] - mnt(pos)
+        f.update(mnt_v)
+        x_est[i] = f.x
+        P_est[i] = f.P
+        j = 500
+        if np.mod(i, j) == 0:
+            p1 = plt.scatter(pos, 0, marker='+', color='k', s=180, lw=3)
+            p2 = plt.scatter(ns_pos - x_est[i], 0, marker='s', color='r')
+            # xs = np.array(xs)  # plt.plot(xs[:, 0], xs[:, 1])
+    plt.legend([p1, p2], ['Actual', 'KF'], loc=4, numpoints=1)
+    plt.figure()
+    plt.plot(x_est - pos_err)
+    plt.figure()
+    plt.plot(np.sqrt(P_est))
+    print('final position error, std:\n\t', x_est[-1] - pos_err, np.sqrt(P_est[-1]))
+    plt.show()
+    return x_est, P_est
 seed(2)
 
 ln = 50000
@@ -231,23 +270,35 @@ smpl = int(ln / v / dt)
 # np.random.seed(seed=None)
 
 
-R = 100
-fld = generate_profile('linear', 10000, dgdl=-1 / 1000, len=10000)
-# fld = generate_profile('M2', 10000, dgdl = 1/1000, len = 1000,sg=10)
+R = 10  # СКО измерений!
 plt.figure()
+map_v, map_interp = generate_profile('M2', smpl, dgdl=5 / 1000, len=ln, sg=30)
+# map_v, map_interp = generate_profile('linear', smpl, dgdl=-5 / 1000, len=ln)
+# map_v, map_interp = generate_profile('sin', smpl, dgdl=-5 / 1000, len=ln)
+plt.plot(map_v[0, :], map_v[2, :])
+
+mnt_v, mnt_interp = model_measurements(map_v, smpl, dt, R)
+plt.figure()
+plt.plot(map_v[0, :], map_v[1, :])
+plt.plot(map_v[0, :], mnt_v, alpha=0.2)
+run_kf(iters=7000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=R)
+# fld = generate_profile('M2', 10000, dgdl = 1/1000, len = 1000,sg=10)
+
+run_pf(iters=7000, N=1000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=R,
+       plot_particles=True)
+
+'''plt.figure()
 plt.plot(fld[0, :], fld[1, :])
 plt.show()
 
-'''
-path = np.linspace(0, ln, smpl, endpoint=False)
-f = scipy.interpolate.interp1d(path, fld[0, :], fill_value='extrapolate')
+
 mnt = model_measurements(fld[0, :], smpl, dt, R)
 m = scipy.interpolate.interp1d(path, mnt, fill_value='extrapolate')
 x_est, P_est = pre_filter(mnt.T, smpl, Fd, Gd, R)
 
 pos_err = 2000
 
-run_pf1(N=1000, plot_particles=True, initial_x=1000, sensor_std_err=R)
+
 plt.figure()
 plt.plot(path, mnt[0, :], alpha=0.7)
 plt.plot(path, fld[0, :])
