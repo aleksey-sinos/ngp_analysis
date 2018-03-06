@@ -35,8 +35,13 @@ def discm(A, B, dt, N, mode):
 
 
 def generate_profile(type, smpl, **kwargs):
-    V = kwargs['V']  # скорость в [м/с]
-    dt = kwargs['dt']
+    # V = kwargs['V']  # скорость в [м/с]
+    len = kwargs['len']
+    dt = kwargs['dt']  # интервал решения задачи [с]
+    time = smpl * dt  # время решения задачи [c]
+
+    V = len / time  # скорость в [м/c]
+
     if type == 'linear':
         len = kwargs['len']
         dgdl = kwargs['dgdl']
@@ -51,11 +56,19 @@ def generate_profile(type, smpl, **kwargs):
         sg_ga = kwargs['sg_ga']
         dgdt = dgdl * V  # градиент поля[мГал / с]
         tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
-        alfa = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с] 
-        q_w = np.sqrt(2 * sg_ga ^ 2 * alfa)  # СКО  порождающего    шума  в  модели  поля
-        F = np.array([-alfa])
-        G = np.array([q_w]])
+        alpha = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с]
+        q_w = np.sqrt(2 * sg_ga**2 * alpha)  # СКО порождающего шума в модели поля
+        F = np.array([[-alpha]])
+        G = np.array([[q_w]])
         Fd, Gd = discm(F, G, dt, 20, 0)
+        fld = np.empty([3, smpl])
+        fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
+        fld[1, 0] = np.dot(Gd, np.random.randn()).ravel()
+        for i in range(1, smpl):
+            n = np.random.randn(Gd.shape[1])
+            fld[1, i] = np.dot(Fd, fld[1, i - 1]) + np.dot(Gd, n)
+        fld[2, :] = np.gradient(fld[1, :])
+
     if type == 'M2':
         len = kwargs['len']
         dgdl = kwargs['dgdl']
@@ -63,14 +76,14 @@ def generate_profile(type, smpl, **kwargs):
         dl = len / smpl  # количество метров на один отсчет [м/отсчет]
         dgds = dgdl * dl  # градиент поля в [мГал/м] переведенный через [м/отсчет]  в [мГал/отсчет]
 
-        '''alfa = (dgds ** 2 / (sg_ga ** 2 * 2)) ** 0.5
+        '''alpha = (dgds ** 2 / (sg_ga ** 2 * 2)) ** 0.5
         beta = dgds / sg_ga'''
 
-        alfa = 0  # (dgds ** 2 / (sg_ga ** 2 * 2)) ** 0.5
+        alpha = 0  # (dgds ** 2 / (sg_ga ** 2 * 2)) ** 0.5
         beta = dgds / sg_ga
 
-        F = np.array([[0, 1], [-(alfa ** 2 + beta ** 2), -2 * alfa]])
-        G = np.array([[0], [np.sqrt(4 * alfa * (sg_ga ** 2) * (alfa ** 2 + beta ** 2))]])
+        F = np.array([[0, 1], [-(alpha ** 2 + beta ** 2), -2 * alpha]])
+        G = np.array([[0], [np.sqrt(4 * alpha * (sg_ga ** 2) * (alpha ** 2 + beta ** 2))]])
         Fd, Gd = discm(F, G, dt, 20, 0)
         fld = np.empty([3, smpl])
         fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
@@ -100,24 +113,41 @@ def get_mnt_value(dist):
     return m(dist)'''
 
 
-def model_measurements(fld, smpl, dt, R):
-    q = R  # корень из интенсивности шума измерений [мГал*с^-1]
-    q_d = q / np.sqrt(dt)
-    err = q_d * np.random.randn(smpl)
+def model_measurements(fld, smpl, dt, r):
+
+    # q_d = r / np.sqrt(dt)
+    err = r * np.random.randn(smpl)
     mnt = fld[1, :] + err
     m = scipy.interpolate.interp1d(fld[0, :], mnt, fill_value='extrapolate')
     return mnt, m
 
 
-def pre_filter(mnt, smpl, Fd, Gd, R):
-    f = KalmanFilter(dim_x=2, dim_z=1)
+class Pre_Filter:
+    def __init__(self, Fd, Gd, sg_ga, r):
+        self.f = KalmanFilter(dim_x=1, dim_z=1)
+        self.f.F = Fd
+        self.f.H = np.array([[1.]])
+        self.f.P = np.array([[sg_ga**2]])
+        self.f.Q = dot(Gd, Gd.T)
+        self.f.R = r ** 2
+        self.mean = []
+        self.var = []
+    def predict(self):
+        self.f.predict()
+    def update(self, mnt):
+        self.f.update(mnt)
+
+
+
+def pre_filter(mnt, smpl, Fd, Gd, r):
+    f = KalmanFilter(dim_x=1, dim_z=1)
     f.fld = np.array([0., 0.])
     f.F = Fd
     f.H = np.array([[1., 0.]])
     f.P = np.array([[400., 0.],
                     [0., 25.]])
     f.Q = dot(Gd, Gd.T)
-    f.R = R ** 2
+    f.R = r ** 2
     x_est = np.empty([2, smpl])
     P_est = np.empty([2, 2, smpl])
     for i in range(1, smpl + 1):
@@ -128,56 +158,45 @@ def pre_filter(mnt, smpl, Fd, Gd, R):
     return x_est, P_est
 
 
-'''def create_uniform_particles(x_range, y_range, hdg_range, N):
-    particles = np.empty((N, 3))
-    particles[:, 0] = uniform(x_range[0], x_range[1], size=N)
-    particles[:, 1] = uniform(y_range[0], y_range[1], size=N)
-    particles[:, 2] = uniform(hdg_range[0], hdg_range[1], size=N)
-    particles[:, 2] %= 2 * np.pi
-    return particles'''
+class PF:
+    def __init__(self, N):
+        self.N = N
+        self.particles = np.zeros(N)
+        self.weights = np.zeros(N)
+        self.mean = []
+        self.var = []
 
 
-def create_gaussian_particles(mean, std, N):
-    # particles = np.empty((N, 1))
-    particles = mean + (randn(N) * std)
-    return particles
+    def create_gaussian_particles(self, mean, std):
+        self.particles = mean + (randn(self.N) * std)
+        self.weights.fill(1.)
+
+    def update(self, mnt, r, ns_pos, map):
+        map_value = map(ns_pos - self.particles)[1]
+        self.weights *= scipy.stats.norm(map_value, r).pdf(mnt.ravel())
+        #self.weights += 1.e-300  # avoid round-off to zero
+        self.weights /= sum(self.weights)  # normalize
 
 
-def predict(particles, std):
-    N = len(particles)
-    # update heading
-    particles += randn(N) * std
+
+    def predict(self, std):
+        self.particles += randn(self.N) * std
+
+    def estimate(self):
+        self.mean.extend([np.average(self.particles, weights=self.weights, axis=0)])
+        self.var.extend([np.average((self.particles - self.mean[-1]) ** 2, weights=self.weights, axis=0)])
+
+    def neff(self, weights):
+        return 1. / np.sum(np.square(weights))
+
+    def resample_from_index(self):
+        indexes = systematic_resample(self.weights)
+        self.particles[:] = self.particles[indexes]
+        self.weights[:] = self.weights[indexes]
+        self.weights.fill(1.0 / self.N)
 
 
-def update(particles, weights, z, R, ns_pos, map):
-    # distance = np.linalg.norm(particles[:, 0:2] - landmark, axis=1)
-    map_value = map(ns_pos - particles)[1]
-    weights *= scipy.stats.norm(map_value, R).pdf(z.ravel())
-
-    weights += 1.e-300  # avoid round-off to zero
-    weights /= sum(weights)  # normalize
-
-
-def estimate(particles, weights):
-    """returns mean and variance of the weighted particles"""
-
-    ns_err = particles
-    mean = np.average(ns_err, weights=weights, axis=0)
-    var = np.average((ns_err - mean) ** 2, weights=weights, axis=0)
-    return mean, var
-
-
-def neff(weights):
-    return 1. / np.sum(np.square(weights))
-
-
-def resample_from_index(particles, weights, indexes):
-    particles[:] = particles[indexes]
-    weights[:] = weights[indexes]
-    weights.fill(1.0 / len(weights))
-
-
-def run_pf(N, iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err=None,
+def run_pf(N, iters=0, pos=None, pos_err=None, init_err_std=None, sensor_std_err=None,
            mnt=None, map=None, do_plot=True, plot_particles=False):
     particles = create_gaussian_particles(mean=0, std=init_err_std, N=N)
 
@@ -205,7 +224,7 @@ def run_pf(N, iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_
         predict(particles, std=0.1)
 
         # incorporate measurements
-        update(particles, weights, z=zs, R=sensor_std_err, ns_pos=ns_pos, map=map)
+        update(particles, weights, z=zs, r=sensor_std_err, ns_pos=ns_pos, map=map)
 
         # resample if too few effective particles
         if neff(weights) < N / 2:
@@ -237,7 +256,7 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
     f.F = np.array([[1]])
     f.P = init_err_std ** 2
     f.Q = 0.01
-    f.R = R ** 2
+    f.R = r ** 2
     f.x = np.array([[0]])
     x_est = np.empty([iters])
     x_est[0] = 0
@@ -272,40 +291,103 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
     print('final position error, std:\n\t', x_est[-1] - pos_err, np.sqrt(P_est[-1]))
     plt.show()
     return x_est, P_est
-seed(2)
 
-ln = 50000
-v = 5
-dt = 1
-smpl = int(ln / v / dt)
-# np.random.seed(seed=None)
+# Параметры
+seed()
+len = 30000  # длинна траектории [м]
+dt = 1  # [с]
+smpl = 6000
+dl = len / smpl  # пространственный интервал решения [м]
+V = 5
+r = 20  # корень из интенсивности шума измерений [мГал*с^-1]
+sg_ga = 30
+dgdl = 5 / 1000
 
+# Подготовка поля и его измерений
+map_v, map_interp = generate_profile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt)
+mnt_v, mnt_interp = model_measurements(map_v, smpl, dt, r)
 
-R = 10  # СКО измерений!
-plt.figure()
-map_v, map_interp = generate_profile('M2', smpl, dgdl=5 / 1000, len=ln, sg_ga=30)
 # map_v, map_interp = generate_profile('linear', smpl, dgdl=-5 / 1000, len=ln)
 # map_v, map_interp = generate_profile('sin', smpl, dgdl=-5 / 1000, len=ln)
-plt.plot(map_v[0, :], map_v[2, :])
+# plt.plot(map_v[0, :], map_v[1, :])
+# plt.figure()
+# plt.plot(map_v[0, :], map_v[2, :])
+# plt.show()
 
-mnt_v, mnt_interp = model_measurements(map_v, smpl, dt, R)
+# Начальные условия
+
+sg_tau = 500  # СКО погрешности НС
+pos = 3000
+tau = sg_tau*randn()
+
+print('tau:', tau)
+
+# Инициализация фильтров
+pf = PF(10000)
+pf.create_gaussian_particles(0, sg_tau*1.5)
+
 plt.figure()
 plt.plot(map_v[0, :], map_v[1, :])
-plt.plot(map_v[0, :], mnt_v, alpha=0.2)
-run_kf(iters=7000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=R)
-# fld = generate_profile('M2', 10000, dgdl = 1/1000, len = 1000,sg_ga=10)
+plt.plot(map_v[0, :], mnt_v, alpha=0.4)
+plt.draw()
+plt.pause(0.001)
 
-run_pf(iters=7000, N=1000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=R,
-       plot_particles=True)
+# инициализация фильтра предварительной обработки
+
+dgdt = dgdl * V  # градиент поля[мГал / с]
+tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
+alpha = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с]
+q_w = np.sqrt(2 * sg_ga ** 2 * alpha)  # СКО порождающего шума в модели поля
+F = np.array([[-alpha]])
+G = np.array([[q_w]])
+Fd, Gd = discm(F, G, dt, 20, 0)
+prf = Pre_Filter(Fd, Gd, sg_ga, r)
+
+
+# Моделирование работы алгоритмов оценивания
+
+for i in range(500):
+    pos += dl*2
+    ns_pos = pos + tau
+    mnt = mnt_interp(pos)
+    pf.update(mnt, r, ns_pos, map_interp)
+    pf.estimate()
+    pf.predict(1)
+    # if pf.neff(pf.weights) < pf.N / 2:
+    #     pf.resample_from_index()
+
+print('tau estimate', pf.mean[-1])
+print('tau std', np.sqrt(pf.var[-1]))
+
+var_real = (tau - np.array(pf.mean)) ** 2
+
+plt.figure()
+plt.plot(np.sqrt(pf.var))
+#plt.legend(['рассчетная'])
+plt.plot(np.sqrt(var_real))
+plt.legend(['рассчетная', 'действительная'])
+plt.show()
+
+# plt.figure()
+# plt.plot(map_v[0, :], map_v[1, :])
+# plt.plot(map_v[0, :], mnt_v, alpha=0.2)
+#
+# plt.figure()
+
+# run_kf(iters=7000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=r)
+# # fld = generate_profile('M2', 10000, dgdl = 1/1000, len = 1000,sg_ga=10)
+#
+# run_pf(iters=7000, N=1000, pos=3000, pos_err=1000, init_err_std=500, map=map_interp, mnt=mnt_interp, sensor_std_err=r,
+#        plot_particles=True)
 
 '''plt.figure()
 plt.plot(fld[0, :], fld[1, :])
 plt.show()
 
 
-mnt = model_measurements(fld[0, :], smpl, dt, R)
+mnt = model_measurements(fld[0, :], smpl, dt, r)
 m = scipy.interpolate.interp1d(path, mnt, fill_value='extrapolate')
-x_est, P_est = pre_filter(mnt.T, smpl, Fd, Gd, R)
+x_est, P_est = pre_filter(mnt.T, smpl, Fd, Gd, r)
 
 pos_err = 2000
 
