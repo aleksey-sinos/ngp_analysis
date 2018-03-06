@@ -10,6 +10,10 @@ from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 from scipy import interpolate
 from numpy.random import seed
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.collections import PolyCollection
+import seaborn as sns
+
 
 
 def discm(A, B, dt, N, mode):
@@ -130,12 +134,16 @@ class Pre_Filter:
         self.f.P = np.array([[sg_ga**2]])
         self.f.Q = dot(Gd, Gd.T)
         self.f.R = r ** 2
-        self.mean = []
-        self.var = []
+        self.f.x = np.array([[0]])
+        self.mean = np.array([0])
+        self.var = np.array([sg_ga ** 2])
     def predict(self):
         self.f.predict()
     def update(self, mnt):
         self.f.update(mnt)
+        self.mean = np.append(self.mean, self.f.x)
+        self.var = np.append(self.var, self.f.P)
+
 
 
 
@@ -294,14 +302,27 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
 
 # Параметры
 seed()
-len = 30000  # длинна траектории [м]
+len = 10000  # длинна траектории [м]
 dt = 1  # [с]
-smpl = 6000
-dl = len / smpl  # пространственный интервал решения [м]
+smpl = 10000
+# dl = len / smpl  # пространственный интервал решения [м]
 V = 5
 r = 20  # корень из интенсивности шума измерений [мГал*с^-1]
 sg_ga = 30
 dgdl = 5 / 1000
+dgdt = dgdl * V  # градиент поля[мГал / с]
+tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
+alpha = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с]
+q_w = np.sqrt(2 * sg_ga ** 2 * alpha)  # СКО порождающего шума в модели поля
+
+print('СКО поля:', sg_ga, 'мГал.', "Интервал корреляции поля:", tau_ga * V, "м.", "СКО ошибки измерений:", r, "мГал")
+
+fig = plt.figure()
+ax = fig.gca(projection='3d')
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
+ax.set_zlim(0, 0.1)
 
 # Подготовка поля и его измерений
 map_v, map_interp = generate_profile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt)
@@ -319,53 +340,110 @@ mnt_v, mnt_interp = model_measurements(map_v, smpl, dt, r)
 sg_tau = 500  # СКО погрешности НС
 pos = 3000
 tau = sg_tau*randn()
+p_number = 5000
+print('Истинное значение tau', tau, "м.", 'Априорное СКО:', sg_tau, "м.")
 
-print('tau:', tau)
+
 
 # Инициализация фильтров
-pf = PF(10000)
-pf.create_gaussian_particles(0, sg_tau*1.5)
+pf = PF(p_number)
+pf.create_gaussian_particles(0, sg_tau)
 
-plt.figure()
-plt.plot(map_v[0, :], map_v[1, :])
-plt.plot(map_v[0, :], mnt_v, alpha=0.4)
-plt.draw()
-plt.pause(0.001)
+pf2 = PF(p_number)
+pf2.create_gaussian_particles(0, sg_tau)
+
 
 # инициализация фильтра предварительной обработки
 
-dgdt = dgdl * V  # градиент поля[мГал / с]
-tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
-alpha = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с]
-q_w = np.sqrt(2 * sg_ga ** 2 * alpha)  # СКО порождающего шума в модели поля
+
 F = np.array([[-alpha]])
 G = np.array([[q_w]])
 Fd, Gd = discm(F, G, dt, 20, 0)
 prf = Pre_Filter(Fd, Gd, sg_ga, r)
 
+# рассчет СКО ошибки фильтрации
+
+# рассчет интервала решения задачи
+
+
 
 # Моделирование работы алгоритмов оценивания
 
-for i in range(500):
-    pos += dl*2
+
+mnt_num = 1000
+st_state = False
+unsample = 300  # [м]
+start_pos = 0
+for i in range(mnt_num):
+    pos += V * dt
     ns_pos = pos + tau
     mnt = mnt_interp(pos)
-    pf.update(mnt, r, ns_pos, map_interp)
-    pf.estimate()
-    pf.predict(1)
+
+    prf.predict()
+    prf.update(mnt)
+
+    if st_state is False and np.abs(prf.var[-1] - prf.var[-2]) < 1e-3:
+        st_state = True
+        start_pos = pos
+        mnt_new = 0
+        mnt_tr = 0
+        print('Установившийся режим в традиционном подходе начиная с', i, 'шага - ', (start_pos), 'м')
+        print('Установившееся СКО ошибки оценивания поля:', np.sqrt(prf.var[-1]), 'мГал')
+        print('Интервал измерений в новом подходе', V * dt, "м")
+        print('Интервал измерений в традиционном подходе', unsample, "м")
+        print('Коэффициент корреляции помехи измерений', 4.842, "мГал - ", 4.842 / np.sqrt(prf.var[-1]) * 100, "%")
+
+    if st_state == True:
+        mnt_new += 1
+        pf.update(mnt, r, ns_pos, map_interp)
+        pf.estimate()
+        if np.mod(pos - start_pos, unsample) == 0:
+            mnt_tr += 1
+            pf2.update(prf.mean[-1], np.sqrt(prf.var[-1]), ns_pos, map_interp)
+            pf2.estimate()
+
+    #pf.predict(1)
     # if pf.neff(pf.weights) < pf.N / 2:
     #     pf.resample_from_index()
+    if np.mod(i, 20) == 0:
+        data = np.array([pf.particles, pf.weights])
+        data = data[:, np.argsort(data[0])]
+        ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')
 
-print('tau estimate', pf.mean[-1])
-print('tau std', np.sqrt(pf.var[-1]))
+err_new = np.abs(tau - np.array(pf.mean))
+err_tr = np.abs(tau - np.array(pf2.mean))
 
-var_real = (tau - np.array(pf.mean)) ** 2
+print("Использованная для навигации длина траектории", mnt_new * V * dt, "м")
+
+print('Новый подход: Оценка tau', pf.mean[-1], 'СКО tau', np.sqrt(pf.var[-1]), 'по', mnt_new, 'измерениям. Ошибка:',
+      err_new[-1], 'м')
+print('Традиционный: Оценка tau', pf2.mean[-1], 'СКО tau', np.sqrt(pf2.var[-1]), 'по', mnt_tr, 'измерениям. Ошибка:',
+      err_tr[-1], 'м')
+
+nav_path = np.arange(start_pos, start_pos + V * dt * mnt_new, V * dt)
+nav_path_tr = np.arange(start_pos, start_pos + unsample * mnt_tr, unsample)
 
 plt.figure()
-plt.plot(np.sqrt(pf.var))
-#plt.legend(['рассчетная'])
-plt.plot(np.sqrt(var_real))
-plt.legend(['рассчетная', 'действительная'])
+plt.plot(map_v[0, :], map_v[1, :])
+plt.plot(map_v[0, :], mnt_v, alpha=0.4)
+plt.plot(nav_path, prf.mean[mnt_num - mnt_new + 1:], alpha=0.7)
+plt.legend(['Истинное значение', 'Исходные измерения', 'Оценка поля'])
+plt.gca().set_xlabel('[М]')
+plt.gca().set_ylabel('[мГал]')
+
+plt.draw()
+plt.pause(0.001)
+
+plt.figure()
+plt.plot(nav_path, 3 * np.sqrt(pf.var))
+plt.plot(nav_path, err_new)
+plt.plot(nav_path_tr, 3 * np.sqrt(pf2.var))
+plt.plot(nav_path_tr, err_tr)
+plt.legend(['рассчетные 3 СКО новый', 'действительная ошибка новый', 'рассчетные 3 СКО традиционный',
+            'действительная ошибка традиционный'])
+plt.grid()
+plt.gca().set_xlabel('[М]')
+plt.gca().set_ylabel('СКО [мГал]')
 plt.show()
 
 # plt.figure()
