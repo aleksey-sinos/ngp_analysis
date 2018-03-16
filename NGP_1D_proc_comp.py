@@ -95,8 +95,37 @@ def generate_profile(type, smpl, **kwargs):
         for i in range(1, smpl):
             n = np.random.randn(Gd.shape[1])
             fld[1:3, i] = np.dot(Fd, fld[1:3, i - 1]) + np.dot(Gd, n)
-    if type == 'GRDN':
-        pass
+    if type == 'Jordan':
+        len = kwargs['len']
+        dgdl = kwargs['dgdl']
+        sg_ga = kwargs['sg_ga']
+        DZETA = (np.sqrt(5) - 1) / np.sqrt(5)
+
+        beta = V * dgdl / sg_ga / np.sqrt(2)
+        F = np.zeros([3, 3])
+        G = np.zeros([3, 1])
+        C = np.zeros([1, 3])
+        C[0, 0] = -beta * DZETA
+        C[0, 1] = 1
+
+        F[0, 0] = -beta
+        F[1, 1] = -beta
+        F[2, 2] = -beta
+        F[0, 1] = 1
+        F[1, 2] = 1
+        G[2, 0] = sg_ga * np.sqrt(10 * beta ** 3)
+
+        Fd, Gd = discm(F, G, dt, 20, 0)
+        x = np.zeros([3, smpl])
+        fld = np.zeros([3, smpl])
+        fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
+        x[1, 0] = np.dot(sg_ga, np.random.randn())
+        for i in range(1, smpl):
+            n = np.random.randn(Gd.shape[1])
+            x[:, i] = np.dot(Fd, x[:, i - 1]) + np.dot(Gd, n)
+        fld[1, :] = np.dot(C, x)
+        fld[2, :] = np.gradient(fld[1, :])
+
     if type == 'sin':
         len = kwargs['len']
         p = 1000
@@ -307,7 +336,7 @@ dt = 1  # [с]
 smpl = 10000
 # dl = len / smpl  # пространственный интервал решения [м]
 V = 5
-r = 20  # корень из интенсивности шума измерений [мГал*с^-1]
+r = 5  # корень из интенсивности шума измерений [мГал*с^-1]
 sg_ga = 30
 dgdl = 5 / 1000
 dgdt = dgdl * V  # градиент поля[мГал / с]
@@ -325,8 +354,10 @@ ax.set_zlabel('Z')
 ax.set_zlim(0, 0.1)
 
 # Подготовка поля и его измерений
-map_v, map_interp = generate_profile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt)
+map_v, map_interp = generate_profile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt)
+# map_v, map_interp = generate_profile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt)
 mnt_v, mnt_interp = model_measurements(map_v, smpl, dt, r)
+
 
 # map_v, map_interp = generate_profile('linear', smpl, dgdl=-5 / 1000, len=ln)
 # map_v, map_interp = generate_profile('sin', smpl, dgdl=-5 / 1000, len=ln)
@@ -428,22 +459,22 @@ plt.plot(map_v[0, :], map_v[1, :])
 plt.plot(map_v[0, :], mnt_v, alpha=0.4)
 plt.plot(nav_path, prf.mean[mnt_num - mnt_new + 1:], alpha=0.7)
 plt.legend(['Истинное значение', 'Исходные измерения', 'Оценка поля'])
-plt.gca().set_xlabel('[М]')
-plt.gca().set_ylabel('[мГал]')
+plt.gca().set_xlabel('[М]', fontsize=12)
+plt.gca().set_ylabel('[ед.]', fontsize=12)
 
 plt.draw()
 plt.pause(0.001)
 
 plt.figure()
-plt.plot(nav_path, 3 * np.sqrt(pf.var))
-plt.plot(nav_path, err_new)
-plt.plot(nav_path_tr, 3 * np.sqrt(pf2.var))
-plt.plot(nav_path_tr, err_tr)
-plt.legend(['рассчетные 3 СКО новый', 'действительная ошибка новый', 'рассчетные 3 СКО традиционный',
-            'действительная ошибка традиционный'])
+plt.plot(nav_path, 3 * np.sqrt(pf.var), linestyle=":")
+plt.plot(nav_path, err_new, linestyle="-.")
+plt.plot(nav_path_tr, 3 * np.sqrt(pf2.var), linestyle="-")
+plt.plot(nav_path_tr, err_tr, linestyle="--")
+plt.legend(['3 СКО (новый)', 'действительная ошибка (новый)', '3 СКО (старый)',
+            'действительная ошибка (старый)'], fontsize='12')
 plt.grid()
-plt.gca().set_xlabel('[М]')
-plt.gca().set_ylabel('СКО [мГал]')
+plt.gca().set_xlabel('[М]', fontsize=12)
+plt.gca().set_ylabel('СКО [ед.]', fontsize=12)
 plt.show()
 
 # plt.figure()
