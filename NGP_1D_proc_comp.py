@@ -354,7 +354,7 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
 '''
 
 # Параметры моделирования
-seed()
+seed(1)
 len = 10000  # длинна траектории [м]
 
 dt = 1  # [с]
@@ -362,9 +362,9 @@ smpl = 10000
 path = np.linspace(0, len, smpl, endpoint=False)
 # dl = len / smpl  # пространственный интервал решения [м]
 V = 5
-r = 1  # корень из интенсивности шума измерений [мГал*с^-1]
+r = 20  # корень из интенсивности шума измерений [мГал*с^-1]
 sg_ga = 10  # СКО полезного сигнала
-dgdl = 5 / 1000  # СКО производной полезного сигнала [мГал / м]
+dgdl = 50 / 1000  # СКО производной полезного сигнала [мГал / м]
 dgdt = dgdl * V  # СКО производной полезного сигнала [мГал / с]
 
 # tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
@@ -377,6 +377,7 @@ mdl = mdls['Jordan']
 
 # Подготовка поля и его измерений
 map_v, map_interp = GenerateProfile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
+seed()
 mnt_v, mnt_interp = ModelMeasurements(map_v, smpl, dt, r)
 
 print("СКО поля:", sg_ga, "мГал.",
@@ -404,6 +405,7 @@ pass
 
 sg_tau = 500  # СКО погрешности НС
 start_pos = 3000  # действительное начальное местоположение
+nav_path = np.linspace(start_pos, len, len-start_pos, endpoint=False)
 tau = sg_tau * randn()  # действительное значение tau
 
 print('Истинное значение tau', tau, "м.", 'Априорное СКО:', sg_tau, "м.")
@@ -432,9 +434,10 @@ prf = Pre_Filter(mdl, P0, r)
 
 # фильтрация
 print('Предварительная фильтрация измерений...')
-(mu, cov, _, _) = prf.batch_filter(mnt_v)
+(mu, cov, _, _) = prf.batch_filter(mnt_interp(nav_path))
 P_f = (mdl.C @ cov @ mdl.C.T).ravel()
-mnt_f_interp = scipy.interpolate.interp1d(path, (mdl.C @ mu).ravel(), fill_value=0)
+mnt_f_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ mu).ravel(), fill_value=0)
+P_f_interp = scipy.interpolate.interp1d(nav_path, P_f, fill_value=0)
 
 st_step_f = find_stab(P_f, 0.001, 100)
 print('Установившийся режим для предварительной фильтрации', st_step_f, 'шага - ', st_step_f * V * dt, 'м')
@@ -445,7 +448,9 @@ print('Интервал измерений для предварительной
 print('Предварительное сглаживание измерений...')
 (x, P, K) = prf.rts_smoother(mu, cov)
 P_s = (mdl.C @ P @ mdl.C.T).ravel()
-mnt_s_interp = scipy.interpolate.interp1d(path, (mdl.C @ x).ravel(), fill_value=0)
+mnt_s_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ x).ravel(), fill_value=0)
+P_s_interp = scipy.interpolate.interp1d(nav_path, P_s, fill_value=0)
+
 st_step_s = find_stab(P_s, 0.001, 100)
 print('Установившийся режим для предварительного сглаживания', st_step_s, 'шага - ', st_step_s * V * dt, 'м')
 print('Установившееся СКО ошибки оценивания поля:', P_s[st_step_s], 'мГал')
@@ -504,12 +509,12 @@ for i in range(mnt_num):
         # с фильтрацией
         if np.mod(pos - start_pos, unsample_f) == 0:
             mnt_cnt_f += 1
-            pf_f.update(mnt_f, P_f[st_step_f], ns_pos, map_interp)
+            pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
             pf_f.estimate()
         # со сглаживанием
         if np.mod(pos - start_pos, unsample_s) == 0:
             mnt_cnt_s += 1
-            pf_s.update(mnt_s, P_s[st_step_s], ns_pos, map_interp)
+            pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
             pf_s.estimate()
     if np.mod(i, 100) == 0:
         print('Шаг', i)
