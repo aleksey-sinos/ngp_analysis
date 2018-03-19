@@ -38,7 +38,7 @@ def InitModels(smpl, **kwargs):
     G = np.array([[q_w]])
     Fd, Gd = discm(F, G, dt, 20, 0)
     sys = ss(Fd, Gd, 1, 0, dt=dt)
-    sys.P0 = sg_ga
+    sys.P0 = sg_ga ** 2
     mdls['M1'] = sys
 
     # Jordan
@@ -247,10 +247,10 @@ class PF:
 
 def find_stab(data, th, th_ln):
     l = data.shape[0]
-    ddata = np.diff(data)
+    # ddata = np.diff(data)
     st_index = -1
     for i in range(l):
-        if all(np.abs(ddata[i:i + th_ln]) < th):
+        if (np.abs(data[i] - data[i + th_ln]) < th):
             st_index = i
             break
     return st_index
@@ -354,18 +354,23 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
 '''
 
 # Параметры моделирования
-seed(1)
+seed(10)  #4 #7 #10
 len = 10000  # длинна траектории [м]
 
 dt = 1  # [с]
-smpl = 10000
+smpl = 2000
 path = np.linspace(0, len, smpl, endpoint=False)
 # dl = len / smpl  # пространственный интервал решения [м]
 V = 5
 r = 20  # корень из интенсивности шума измерений [мГал*с^-1]
-sg_ga = 10  # СКО полезного сигнала
+sg_ga = 30  # СКО полезного сигнала
 dgdl = 50 / 1000  # СКО производной полезного сигнала [мГал / м]
 dgdt = dgdl * V  # СКО производной полезного сигнала [мГал / с]
+
+sg_tau = 500  # СКО погрешности НС
+start_pos = 3000  # действительное начальное местоположение
+mnt_num = 1000
+nav_path = np.linspace(start_pos, start_pos + mnt_num * V, mnt_num, endpoint=False)
 
 # tau_ga = sg_ga / dgdt  # интервал корреляции поля, соответствующий h [c]
 # alpha = 1 / tau_ga  # величина, обратная интервалу корреляции поля [1/с]
@@ -373,171 +378,215 @@ dgdt = dgdl * V  # СКО производной полезного сигнал
 
 InitModels(smpl, sg_ga=sg_ga, dgdl=dgdl, len=len, dt=dt)
 
-mdl = mdls['Jordan']
+mdl = mdls['M1']
 
 # Подготовка поля и его измерений
-map_v, map_interp = GenerateProfile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
-seed()
-mnt_v, mnt_interp = ModelMeasurements(map_v, smpl, dt, r)
-
+map_v, map_interp = GenerateProfile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
 print("СКО поля:", sg_ga, "мГал.",
       "СКО производной поля:", dgdl, "мГал / м.",
       "СКО ошибки измерений:", r, "мГал.")
 
-'''fig = plt.figure()
+err_n_buf, err_f_buf, err_s_buf = [], [], []
+P_n_buf, P_f_buf, P_s_buf = [], [], []
+tau_est_n_buf, tau_est_f_buf, tau_est_s_buf = [], [], []
+
+fig = plt.figure()
 ax = fig.gca(projection='3d')
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_zlabel('Z')
-ax.set_zlim(0, 0.1)
-'''
+ax.set_xlabel('dX')
+ax.set_ylabel('Номер измерения')
+ax.set_zlabel('Значение плотности')
+ax.set_zlim(0, 0.5)
 
-# map_v, map_interp = generate_profile('linear', smpl, dgdl=-5 / 1000, len=ln)
-# map_v, map_interp = generate_profile('sin', smpl, dgdl=-5 / 1000, len=ln)
-# plt.plot(map_v[0, :], map_v[1, :])
-# plt.figure()
-# plt.plot(map_v[0, :], map_v[2, :])
-# plt)
+mse_num = 1
+for mse in range(mse_num):
+    print('Итерация', mse + 1)
+    seed()
+    mnt_v, mnt_interp = ModelMeasurements(map_v, smpl, dt, r)
+
+    # Начальные условия для задачи навигации
+
+    tau = sg_tau * randn()  # действительное значение tau
+
+    print('Истинное значение tau', tau, "м.", 'Априорное СКО:', sg_tau, "м.")
+
+    # Инициализация навигационных фильтров
+
+    p_number = 5000
+    pf_n = PF(p_number)
+    pf_n.create_gaussian_particles(0, sg_tau)
+
+    pf_f = PF(p_number)
+    pf_f.create_gaussian_particles(0, sg_tau)
+
+    pf_s = PF(p_number)
+    pf_s.create_gaussian_particles(0, sg_tau)
+
+    print('Интервал измерений в новом подходе', V * dt, "м")
+
+    # инициализация фильтра предварительной обработки
+
+    unsample_f = 100  # [м]
+    unsample_s = 50  # [м]
+
+    P0 = mdl.P0
+    prf = Pre_Filter(mdl, P0, r)
+
+    # фильтрация
+    print('Предварительная фильтрация измерений...')
+    (mu, cov, _, _) = prf.batch_filter(mnt_interp(nav_path))
+    P_f = (mdl.C @ cov @ mdl.C.T).ravel()
+    mnt_f_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ mu).ravel(), fill_value=0)
+    P_f_interp = scipy.interpolate.interp1d(nav_path, P_f, fill_value=0)
+
+    pr_f_err = (map_interp(nav_path)[1] - mnt_f_interp(nav_path))
+    st_step_f = find_stab(P_f, 0.1, 50)
+    print('Установившийся режим для предварительной фильтрации', st_step_f, 'шага - ', st_step_f * V * dt, 'м')
+    print('Установившееся СКО ошибки оценивания поля:', np.sqrt(P_f[st_step_f]), 'мГал')
+    print('Интервал измерений для предварительной фильтрации', unsample_f, "м")
+
+    # сглажиавание
+    print('Предварительное сглаживание измерений...')
+    (x, P, K) = prf.rts_smoother(mu, cov)
+    P_s = (mdl.C @ P @ mdl.C.T).ravel()
+    mnt_s_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ x).ravel(), fill_value=0)
+    P_s_interp = scipy.interpolate.interp1d(nav_path, P_s, fill_value=0)
+
+    pr_s_err = (map_interp(nav_path)[1] - mnt_s_interp(nav_path))
+    st_step_s = find_stab(P_s, 0.1, 50)
+    print('Установившийся режим для предварительного сглаживания', st_step_s, 'шага - ', st_step_s * V * dt, 'м')
+    print('Установившееся СКО ошибки оценивания поля:', np.sqrt(P_s[st_step_s]), 'мГал')
+    print('Интервал измерений для предварительной фильтрации', unsample_s, "м")
+
+    '''
+    for i in range(2000):
+        pos += V * dt
+        #ns_pos = pos + tau
+        mnt = mnt_interp(pos)
+    
+        prf.predict()
+        prf.update(mnt)
+        est[i] = np.dot(mdls['Jordan'].C, prf.x)
+    
+    
+    
+    plt.figure()
+    plt.plot(map_v[0, :], map_v[1, :])
+    plt.plot(map_v[0, :], mnt_v, alpha=0.4)
+    plt.plot(path, est, alpha=0.7)
+    plt.legend(['Истинное значение', 'Исходные измерения', 'Оценка поля'])
+    plt.gca().set_xlabel('[М]', fontsize=12)
+    plt.gca().set_ylabel('[ед.]', fontsize=12)
+    
+    plt.draw()
+    plt.pause(0.001)
+    '''
+
+    # Моделирование работы алгоритмов оценивания
+
+    st_state = True
+    est_ready = True
+
+    mnt_cnt_n, mnt_cnt_f, mnt_cnt_s = 0, 0, 0
+
+    print('Оценивание ошибок НС...')
+    for i in range(mnt_num):
+        pos = start_pos + V * i
+        ns_pos = pos + tau
+
+        # формирование измерений на шаге
+        mnt = mnt_interp(pos)
+        mnt_f = mnt_f_interp(pos)
+        mnt_s = mnt_s_interp(pos)
+
+        if st_state == True:
+
+            # фильтр без обработки
+            mnt_cnt_n += 1
+            pf_n.update(mnt, r, ns_pos, map_interp)
+            pf_n.estimate()
+
+            # с фильтрацией
+            if np.mod(pos - start_pos, unsample_f) == 0:
+                mnt_cnt_f += 1
+                pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
+                pf_f.estimate()
+            # со сглаживанием
+            if np.mod(pos - start_pos, unsample_s) == 0:
+                mnt_cnt_s += 1
+                pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
+                pf_s.estimate()
+        if np.mod(i, 100) == 0:
+            print('Шаг', i)
+        # pf.predict(1)
+        # if pf.neff(pf.weights) < pf.N / 2:
+        #     pf.resample_from_index()
+        if np.mod(i, 20) == 0:
+            data = np.array([pf_n.particles, pf_n.weights])
+            data = data[:, np.argsort(data[0])]
+            ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')
+
+    err_n = np.abs(tau - np.array(pf_n.mean))
+    err_f = np.abs(tau - np.array(pf_f.mean))
+    err_s = np.abs(tau - np.array(pf_s.mean))
+
+    err_n_buf.append(err_n)
+    err_f_buf.append(err_f)
+    err_s_buf.append(err_s)
+
+    P_n_buf.append(pf_n.var)
+    P_f_buf.append(pf_f.var)
+    P_s_buf.append(pf_s.var)
+
+    # tau_est_n_buf.append(pf_n.mean)
+    # tau_est_f_buf.append(pf_f.mean)
+    # tau_est_s_buf.append(pf_s.mean)
+
+# расчет средней ошибки
+err_n_buf = np.array(err_n_buf)
+err_f_buf = np.array(err_f_buf)
+err_s_buf = np.array(err_s_buf)
+
+err_n_sum = np.sum(err_n_buf, axis=0) / mse_num
+err_f_sum = np.sum(err_f_buf, axis=0) / mse_num
+err_s_sum = np.sum(err_s_buf, axis=0) / mse_num
+
+# расчет средней рассчетной дисперсии ошибки
+P_n_buf = np.array(P_n_buf)
+P_f_buf = np.array(P_f_buf)
+P_s_buf = np.array(P_s_buf)
+
+P_n_sum = np.sum(P_n_buf, axis=0) / mse_num
+P_f_sum = np.sum(P_f_buf, axis=0) / mse_num
+P_s_sum = np.sum(P_s_buf, axis=0) / mse_num
+
+# # расчет средней оценки
+# tau_est_n_buf = np.array(tau_est_n_buf)
+# tau_est_f_buf = np.array(tau_est_f_buf)
+# tau_est_s_buf = np.array(tau_est_s_buf)
+#
+# tau_est_n_sum = np.sum(tau_est_n_buf, axis=0)/mse_num
+# tau_est_f_sum = np.sum(tau_est_f_buf, axis=0)/mse_num
+# tau_est_s_sum = np.sum(tau_est_s_buf, axis=0)/mse_num
 
 
-pass
-# Начальные условия для задачи навигации
 
-sg_tau = 500  # СКО погрешности НС
-start_pos = 3000  # действительное начальное местоположение
-nav_path = np.linspace(start_pos, len, len-start_pos, endpoint=False)
-tau = sg_tau * randn()  # действительное значение tau
-
-print('Истинное значение tau', tau, "м.", 'Априорное СКО:', sg_tau, "м.")
-
-# Инициализация навигационных фильтров
-
-p_number = 5000
-pf = PF(p_number)
-pf.create_gaussian_particles(0, sg_tau)
-
-pf_f = PF(p_number)
-pf_f.create_gaussian_particles(0, sg_tau)
-
-pf_s = PF(p_number)
-pf_s.create_gaussian_particles(0, sg_tau)
-
-print('Интервал измерений в новом подходе', V * dt, "м")
-
-# инициализация фильтра предварительной обработки
-
-unsample_f = 300  # [м]
-unsample_s = 100  # [м]
-
-P0 = mdl.P0
-prf = Pre_Filter(mdl, P0, r)
-
-# фильтрация
-print('Предварительная фильтрация измерений...')
-(mu, cov, _, _) = prf.batch_filter(mnt_interp(nav_path))
-P_f = (mdl.C @ cov @ mdl.C.T).ravel()
-mnt_f_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ mu).ravel(), fill_value=0)
-P_f_interp = scipy.interpolate.interp1d(nav_path, P_f, fill_value=0)
-
-st_step_f = find_stab(P_f, 0.001, 100)
-print('Установившийся режим для предварительной фильтрации', st_step_f, 'шага - ', st_step_f * V * dt, 'м')
-print('Установившееся СКО ошибки оценивания поля:', P_f[st_step_f], 'мГал')
-print('Интервал измерений для предварительной фильтрации', unsample_f, "м")
-
-# сглажиавание
-print('Предварительное сглаживание измерений...')
-(x, P, K) = prf.rts_smoother(mu, cov)
-P_s = (mdl.C @ P @ mdl.C.T).ravel()
-mnt_s_interp = scipy.interpolate.interp1d(nav_path, (mdl.C @ x).ravel(), fill_value=0)
-P_s_interp = scipy.interpolate.interp1d(nav_path, P_s, fill_value=0)
-
-st_step_s = find_stab(P_s, 0.001, 100)
-print('Установившийся режим для предварительного сглаживания', st_step_s, 'шага - ', st_step_s * V * dt, 'м')
-print('Установившееся СКО ошибки оценивания поля:', P_s[st_step_s], 'мГал')
-print('Интервал измерений для предварительной фильтрации', unsample_s, "м")
-
-'''
-for i in range(2000):
-    pos += V * dt
-    #ns_pos = pos + tau
-    mnt = mnt_interp(pos)
-
-    prf.predict()
-    prf.update(mnt)
-    est[i] = np.dot(mdls['Jordan'].C, prf.x)
-
-
-
-plt.figure()
-plt.plot(map_v[0, :], map_v[1, :])
-plt.plot(map_v[0, :], mnt_v, alpha=0.4)
-plt.plot(path, est, alpha=0.7)
-plt.legend(['Истинное значение', 'Исходные измерения', 'Оценка поля'])
-plt.gca().set_xlabel('[М]', fontsize=12)
-plt.gca().set_ylabel('[ед.]', fontsize=12)
-
-plt.draw()
-plt.pause(0.001)
-'''
-
-# Моделирование работы алгоритмов оценивания
-
-mnt_num = 1000
-st_state = True
-est_ready = True
-
-mnt_cnt_n, mnt_cnt_f, mnt_cnt_s = 0, 0, 0
-
-print('Оценивание ошибок НС...')
-for i in range(mnt_num):
-    pos = start_pos + V * i
-    ns_pos = pos + tau
-
-    # формирование измерений на шаге
-    mnt = mnt_interp(pos)
-    mnt_f = mnt_f_interp(pos)
-
-    mnt_s = mnt_s_interp(pos)
-
-    if st_state == True:
-
-        # фильтр без обработки
-        mnt_cnt_n += 1
-        pf.update(mnt, r, ns_pos, map_interp)
-        pf.estimate()
-
-        # с фильтрацией
-        if np.mod(pos - start_pos, unsample_f) == 0:
-            mnt_cnt_f += 1
-            pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
-            pf_f.estimate()
-        # со сглаживанием
-        if np.mod(pos - start_pos, unsample_s) == 0:
-            mnt_cnt_s += 1
-            pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
-            pf_s.estimate()
-    if np.mod(i, 100) == 0:
-        print('Шаг', i)
-    # pf.predict(1)
-    # if pf.neff(pf.weights) < pf.N / 2:
-    #     pf.resample_from_index()
-    '''if np.mod(i, 20) == 0:
-        data = np.array([pf.particles, pf.weights])
-        data = data[:, np.argsort(data[0])]
-        ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')'''
-
-err_n = np.abs(tau - np.array(pf.mean))
-err_f = np.abs(tau - np.array(pf_f.mean))
-err_s = np.abs(tau - np.array(pf_s.mean))
+# print("Использованная для навигации длина траектории", V * mnt_num, "м")
+#
+# print('Новый подход: Оценка tau', pf_n.mean[-1], 'СКО tau', np.sqrt(pf_n.var[-1]), 'по', mnt_cnt_n, 'измерениям. Ошибка:',
+#       err_n[-1], 'м')
+# print('C предварительной фильтрацией: Оценка tau', pf_f.mean[-1], 'СКО tau', np.sqrt(pf_f.var[-1]), 'по', mnt_cnt_f,
+#       'измерениям. Ошибка:', err_f[-1], 'м')
+# print('C предварительным сглаживанием: Оценка tau', pf_s.mean[-1], 'СКО tau', np.sqrt(pf_s.var[-1]), 'по', mnt_cnt_s,
+#       'измерениям. Ошибка:', err_s[-1], 'м')
 
 print("Использованная для навигации длина траектории", V * mnt_num, "м")
 
-print('Новый подход: Оценка tau', pf.mean[-1], 'СКО tau', np.sqrt(pf.var[-1]), 'по', mnt_cnt_n, 'измерениям. Ошибка:',
-      err_n[-1], 'м')
-print('C предварительной фильтрацией: Оценка tau', pf_f.mean[-1], 'СКО tau', np.sqrt(pf_f.var[-1]), 'по', mnt_cnt_f,
-      'измерениям. Ошибка:', err_f[-1], 'м')
-print('C предварительным сглаживанием: Оценка tau', pf_s.mean[-1], 'СКО tau', np.sqrt(pf_s.var[-1]), 'по', mnt_cnt_s,
-      'измерениям. Ошибка:', err_s[-1], 'м')
+print('Новый подход: среднее СКО tau', np.sqrt(P_n_sum[-1]), 'по', mnt_cnt_n, 'измерениям. Средняя ошибка:',
+      err_n_sum[-1], 'м')
+print('C предварительной фильтрацией: среднее СКО tau', np.sqrt(P_f_sum[-1]), 'по', mnt_cnt_f,
+      'измерениям. Средняя ошибка:', err_f_sum[-1], 'м')
+print('C предварительным сглаживанием: среднее СКО tau', np.sqrt(P_s_sum[-1]), 'по', mnt_cnt_s,
+      'измерениям. Средняя ошибка:', err_s_sum[-1], 'м')
 
 nav_path = np.arange(start_pos, start_pos + V * dt * mnt_cnt_n, V * dt)
 nav_path_f = np.arange(start_pos, start_pos + unsample_f * mnt_cnt_f, unsample_f)
@@ -552,20 +601,26 @@ plt.legend(['Истинное значение', 'Исходные измере�
 plt.gca().set_xlabel('[М]', fontsize=12)
 plt.gca().set_ylabel('[ед.]', fontsize=12)
 
+plt.figure()
+plt.plot(nav_path, 3 * np.sqrt(P_f_interp(nav_path)))
+plt.plot(nav_path, np.abs(pr_f_err))
+plt.plot(nav_path, 3 * np.sqrt(P_s_interp(nav_path)))
+plt.plot(nav_path, np.abs(pr_s_err))
+
 plt.draw()
 plt.pause(0.001)
 
 plt.figure()
-plt.plot(nav_path, 3 * np.sqrt(pf.var))
-plt.plot(nav_path_f, 3 * np.sqrt(pf_f.var))
-plt.plot(nav_path_s, 3 * np.sqrt(pf_s.var))
+plt.plot(nav_path, 3 * np.sqrt(P_n_sum), color='C0')
+plt.plot(nav_path_f, 3 * np.sqrt(P_f_sum), color='C1')
+plt.plot(nav_path_s, 3 * np.sqrt(P_s_sum), color='C2')
 
-plt.plot(nav_path, err_n, linestyle='--')
-plt.plot(nav_path_f, err_f, linestyle='--')
-plt.plot(nav_path_s, err_s, linestyle='--')
+plt.plot(nav_path, err_n_sum, linestyle='--', color='C0')
+plt.plot(nav_path_f, err_f_sum, linestyle='--', color='C1')
+plt.plot(nav_path_s, err_s_sum, linestyle='--', color='C2')
 
-plt.legend(['3 СКО (новый)', '3 СКО (фильтрация)', '3 СКО (сглаживание)',
-            'действительная ошибка (новый)',
+plt.legend(['3 СКО (без обработки)', '3 СКО (фильтрация)', '3 СКО (сглаживание)',
+            'действительная ошибка (без обработки)',
             'действительная ошибка (фильтрация)',
             'действительная ошибка (сглаживание)'], fontsize='12')
 plt.grid()
