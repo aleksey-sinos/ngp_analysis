@@ -199,7 +199,7 @@ def ModelMeasurements(fld, smpl, dt, r):
     return mnt, m
 
 
-class Pre_Filter(KalmanFilter):
+class KF(KalmanFilter):
     def __init__(self, sys, P0, r):
         KalmanFilter.__init__(self, dim_x=sys.A.shape[0], dim_z=sys.C.shape[0])
         self.F = sys.A
@@ -421,6 +421,13 @@ for mse in range(mse_num):
     pf_s = PF(p_number)
     pf_s.create_gaussian_particles(0, sg_tau)
 
+    #kf_init
+    F = np.array([1])
+    G = np.array([0])
+    sys = ss(F, G, 1, 0, dt=dt)
+    sys.P0 = sg_tau ** 2
+    kf = KF(sys, sg_tau ** 2, r)
+
     print('Интервал измерений в новом подходе', V * dt, "м")
 
     # инициализация фильтра предварительной обработки
@@ -429,7 +436,7 @@ for mse in range(mse_num):
     unsample_s = 50  # [м]
 
     P0 = mdl.P0
-    prf = Pre_Filter(mdl, P0, r)
+    prf = KF(mdl, P0, r)
 
     # фильтрация
     print('Предварительная фильтрация измерений...')
