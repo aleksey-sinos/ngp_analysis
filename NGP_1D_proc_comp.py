@@ -174,15 +174,17 @@ def GenerateProfile(type, smpl, **kwargs):
             n = np.random.randn(Gd.shape[1])
             x[:, i] = np.dot(Fd, x[:, i - 1]) + np.dot(Gd, n)
         fld[1, :] = np.dot(C, x)
-        fld[2, :] = np.gradient(fld[1, :])
+        fld[2, :] = np.dot(np.gradient(fld[1, :]), smpl / len)
 
     if type == 'sin':
         len = kwargs['len']
-        p = 1000
+        p = 300
+        sg_ga = kwargs['sg_ga']
         fld = np.empty([3, smpl])
         fld[0, :] = np.linspace(0, len, smpl, endpoint=False)
-        fld[1, :] = np.sin(fld[0, :] / p)
-        fld[2, :] = 1 / p * np.cos(fld[0, :] / p)
+        fld[1, :] = sg_ga * np.sin(fld[0, :] / p)
+        fld[2, :] = 1 / p * sg_ga * np.cos(fld[0, :] / p)
+        # fld[2, :] = np.dot(np.gradient(fld[1, :]), smpl / len)
 
     if 'offset' in kwargs:
         fld[1, :] = fld[1, :] + kwargs['offset']
@@ -208,6 +210,12 @@ class KF(KalmanFilter):
         self.Q = dot(sys.B, sys.B.T)
         self.R = r ** 2
         self.x = np.zeros([sys.A.shape[0], 1])
+        self.mean = []
+        self.var = []
+
+    def estimate(self):
+        self.mean.extend([self.x])
+        self.var.extend([self.P])
 
 
 class PF:
@@ -354,7 +362,7 @@ def run_kf(iters=5000, pos=None, pos_err=None, init_err_std=None, sensor_std_err
 '''
 
 # Параметры моделирования
-seed(10)  #4 #7 #10
+seed(587)  #4 #7 #10
 len = 10000  # длинна траектории [м]
 
 dt = 1  # [с]
@@ -368,7 +376,7 @@ dgdl = 50 / 1000  # СКО производной полезного сигна�
 dgdt = dgdl * V  # СКО производной полезного сигнала [мГал / с]
 
 sg_tau = 500  # СКО погрешности НС
-start_pos = 3000  # действительное начальное местоположение
+start_pos = 2700  # действительное начальное местоположение
 mnt_num = 1000
 nav_path = np.linspace(start_pos, start_pos + mnt_num * V, mnt_num, endpoint=False)
 
@@ -378,24 +386,24 @@ nav_path = np.linspace(start_pos, start_pos + mnt_num * V, mnt_num, endpoint=Fal
 
 InitModels(smpl, sg_ga=sg_ga, dgdl=dgdl, len=len, dt=dt)
 
-mdl = mdls['M1']
+mdl = mdls['Jordan']
 
 # Подготовка поля и его измерений
-map_v, map_interp = GenerateProfile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
+map_v, map_interp = GenerateProfile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
 print("СКО поля:", sg_ga, "мГал.",
       "СКО производной поля:", dgdl, "мГал / м.",
       "СКО ошибки измерений:", r, "мГал.")
 
-err_n_buf, err_f_buf, err_s_buf = [], [], []
-P_n_buf, P_f_buf, P_s_buf = [], [], []
-tau_est_n_buf, tau_est_f_buf, tau_est_s_buf = [], [], []
+err_n_buf, err_f_buf, err_s_buf, err_kf_buf = [], [], [], []
+P_n_buf, P_f_buf, P_s_buf, P_kf_buf = [], [], [], []
+tau_est_n_buf, tau_est_f_buf, tau_est_s_buf, tau_est_kf_buf = [], [], [], []
 
-fig = plt.figure()
-ax = fig.gca(projection='3d')
-ax.set_xlabel('dX')
-ax.set_ylabel('Номер измерения')
-ax.set_zlabel('Значение плотности')
-ax.set_zlim(0, 0.5)
+# fig = plt.figure()
+# ax = fig.gca(projection='3d')
+# ax.set_xlabel('dX')
+# ax.set_ylabel('Номер измерения')
+# ax.set_zlabel('Значение плотности')
+# ax.set_zlim(0, 0.1)
 
 mse_num = 1
 for mse in range(mse_num):
@@ -414,6 +422,7 @@ for mse in range(mse_num):
     p_number = 5000
     pf_n = PF(p_number)
     pf_n.create_gaussian_particles(0, sg_tau)
+    pf_n.estimate()
 
     pf_f = PF(p_number)
     pf_f.create_gaussian_particles(0, sg_tau)
@@ -427,6 +436,7 @@ for mse in range(mse_num):
     sys = ss(F, G, 1, 0, dt=dt)
     sys.P0 = sg_tau ** 2
     kf = KF(sys, sg_tau ** 2, r)
+    kf.estimate()
 
     print('Интервал измерений в новом подходе', V * dt, "м")
 
@@ -512,37 +522,47 @@ for mse in range(mse_num):
             pf_n.update(mnt, r, ns_pos, map_interp)
             pf_n.estimate()
 
-            # с фильтрацией
-            if np.mod(pos - start_pos, unsample_f) == 0:
-                mnt_cnt_f += 1
-                pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
-                pf_f.estimate()
-            # со сглаживанием
-            if np.mod(pos - start_pos, unsample_s) == 0:
-                mnt_cnt_s += 1
-                pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
-                pf_s.estimate()
+            # EKF
+            ekf_mnt = map_interp(ns_pos)[1] - mnt
+            kf.predict()
+            kf.update(ekf_mnt, r ** 2, map_interp(ns_pos - kf.x)[2])
+            # kf.update(ekf_mnt, r**2, map_interp(pos)[2])
+            kf.estimate()
+
+            # # с фильтрацией
+            # if np.mod(pos - start_pos, unsample_f) == 0:
+            #     mnt_cnt_f += 1
+            #     pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
+            #     pf_f.estimate()
+            # # со сглаживанием
+            # if np.mod(pos - start_pos, unsample_s) == 0:
+            #     mnt_cnt_s += 1
+            #     pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
+            #     pf_s.estimate()
         if np.mod(i, 100) == 0:
             print('Шаг', i)
         # pf.predict(1)
         # if pf.neff(pf.weights) < pf.N / 2:
         #     pf.resample_from_index()
-        if np.mod(i, 20) == 0:
-            data = np.array([pf_n.particles, pf_n.weights])
-            data = data[:, np.argsort(data[0])]
-            ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')
+            # if np.mod(i, 20) == 0:
+            #     data = np.array([pf_n.particles, pf_n.weights])
+            #     data = data[:, np.argsort(data[0])]
+            #     ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')
 
     err_n = np.abs(tau - np.array(pf_n.mean))
     err_f = np.abs(tau - np.array(pf_f.mean))
     err_s = np.abs(tau - np.array(pf_s.mean))
+    err_kf = np.abs(tau - np.array(kf.mean))
 
     err_n_buf.append(err_n)
     err_f_buf.append(err_f)
     err_s_buf.append(err_s)
+    err_kf_buf.append(err_kf)
 
     P_n_buf.append(pf_n.var)
     P_f_buf.append(pf_f.var)
     P_s_buf.append(pf_s.var)
+    P_kf_buf.append(kf.var)
 
     # tau_est_n_buf.append(pf_n.mean)
     # tau_est_f_buf.append(pf_f.mean)
@@ -552,19 +572,23 @@ for mse in range(mse_num):
 err_n_buf = np.array(err_n_buf)
 err_f_buf = np.array(err_f_buf)
 err_s_buf = np.array(err_s_buf)
+err_kf_buf = np.array(err_kf_buf)
 
 err_n_sum = np.sum(err_n_buf, axis=0) / mse_num
 err_f_sum = np.sum(err_f_buf, axis=0) / mse_num
 err_s_sum = np.sum(err_s_buf, axis=0) / mse_num
+err_kf_sum = np.sum(err_kf_buf, axis=0) / mse_num
 
 # расчет средней рассчетной дисперсии ошибки
 P_n_buf = np.array(P_n_buf)
 P_f_buf = np.array(P_f_buf)
 P_s_buf = np.array(P_s_buf)
+P_kf_buf = np.array(P_kf_buf)
 
 P_n_sum = np.sum(P_n_buf, axis=0) / mse_num
 P_f_sum = np.sum(P_f_buf, axis=0) / mse_num
 P_s_sum = np.sum(P_s_buf, axis=0) / mse_num
+P_kf_sum = np.sum(P_kf_buf, axis=0) / mse_num
 
 # # расчет средней оценки
 # tau_est_n_buf = np.array(tau_est_n_buf)
@@ -590,46 +614,67 @@ print("Использованная для навигации длина тра�
 
 print('Новый подход: среднее СКО tau', np.sqrt(P_n_sum[-1]), 'по', mnt_cnt_n, 'измерениям. Средняя ошибка:',
       err_n_sum[-1], 'м')
-print('C предварительной фильтрацией: среднее СКО tau', np.sqrt(P_f_sum[-1]), 'по', mnt_cnt_f,
-      'измерениям. Средняя ошибка:', err_f_sum[-1], 'м')
-print('C предварительным сглаживанием: среднее СКО tau', np.sqrt(P_s_sum[-1]), 'по', mnt_cnt_s,
-      'измерениям. Средняя ошибка:', err_s_sum[-1], 'м')
+# print('C предварительной фильтрацией: среднее СКО tau', np.sqrt(P_f_sum[-1]), 'по', mnt_cnt_f,
+#       'измерениям. Средняя ошибка:', err_f_sum[-1], 'м')
+# print('C предварительным сглаживанием: среднее СКО tau', np.sqrt(P_s_sum[-1]), 'по', mnt_cnt_s,
+#       'измерениям. Средняя ошибка:', err_s_sum[-1], 'м')
+print('EKF: среднее СКО tau', np.sqrt(P_kf_sum[-1]), 'по', mnt_cnt_n,
+      'измерениям. Средняя ошибка:', err_kf_sum[-1], 'м')
 
-nav_path = np.arange(start_pos, start_pos + V * dt * mnt_cnt_n, V * dt)
+nav_path = np.arange(start_pos, start_pos + V * dt * mnt_cnt_n + 1, V * dt)
 nav_path_f = np.arange(start_pos, start_pos + unsample_f * mnt_cnt_f, unsample_f)
 nav_path_s = np.arange(start_pos, start_pos + unsample_s * mnt_cnt_s, unsample_s)
 
+# Графики поля
 plt.figure()
+plt.subplot(211)
 plt.plot(map_v[0, :], map_v[1, :])
 plt.plot(map_v[0, :], mnt_v, alpha=0.4)
-plt.plot(nav_path, mnt_f_interp(nav_path), alpha=0.7)
-plt.plot(nav_path, mnt_s_interp(nav_path), alpha=0.7)
-plt.legend(['Истинное значение', 'Исходные измерения', 'Фильтрация', 'Слгаживание'])
+plt.plot(start_pos, map_interp(start_pos)[1], "o")
+plt.plot(start_pos + tau, map_interp(start_pos + tau)[1], "x")
+# plt.plot(nav_path, mnt_f_interp(nav_path), alpha=0.7)
+# plt.plot(nav_path, mnt_s_interp(nav_path), alpha=0.7)
+plt.legend(['Истинное значение',
+            'Исходные измерения'  # ,
+            # 'Фильтрация',
+            # 'Слгаживание'
+            ])
 plt.gca().set_xlabel('[М]', fontsize=12)
 plt.gca().set_ylabel('[ед.]', fontsize=12)
+plt.subplot(212)
+plt.plot(map_v[0, :], map_v[2, :])
+plt.legend(['Производная поля'])
+plt.gca().set_xlabel('[М]', fontsize=12)
+plt.gca().set_ylabel('[ед.]/[М]', fontsize=12)
 
-plt.figure()
-plt.plot(nav_path, 3 * np.sqrt(P_f_interp(nav_path)))
-plt.plot(nav_path, np.abs(pr_f_err))
-plt.plot(nav_path, 3 * np.sqrt(P_s_interp(nav_path)))
-plt.plot(nav_path, np.abs(pr_s_err))
+# plt.figure()
+# plt.plot(nav_path, 3 * np.sqrt(P_f_interp(nav_path)))
+# plt.plot(nav_path, np.abs(pr_f_err))
+# plt.plot(nav_path, 3 * np.sqrt(P_s_interp(nav_path)))
+# plt.plot(nav_path, np.abs(pr_s_err))
 
 plt.draw()
 plt.pause(0.001)
 
 plt.figure()
 plt.plot(nav_path, 3 * np.sqrt(P_n_sum), color='C0')
-plt.plot(nav_path_f, 3 * np.sqrt(P_f_sum), color='C1')
-plt.plot(nav_path_s, 3 * np.sqrt(P_s_sum), color='C2')
+# plt.plot(nav_path_f, np.sqrt(P_f_sum), color='C1')
+# plt.plot(nav_path_s, np.sqrt(P_s_sum), color='C2')
+plt.plot(nav_path, 3 * np.sqrt(P_kf_sum.ravel()), color='C3')
 
 plt.plot(nav_path, err_n_sum, linestyle='--', color='C0')
-plt.plot(nav_path_f, err_f_sum, linestyle='--', color='C1')
-plt.plot(nav_path_s, err_s_sum, linestyle='--', color='C2')
+# plt.plot(nav_path_f, err_f_sum, linestyle='--', color='C1')
+# plt.plot(nav_path_s, err_s_sum, linestyle='--', color='C2')
+plt.plot(nav_path, err_kf_sum.ravel(), linestyle='--', color='C3')
 
-plt.legend(['3 СКО (без обработки)', '3 СКО (фильтрация)', '3 СКО (сглаживание)',
-            'действительная ошибка (без обработки)',
-            'действительная ошибка (фильтрация)',
-            'действительная ошибка (сглаживание)'], fontsize='12')
+plt.legend(['3 СКО расчетное (PF)',
+            # 'СКО расчетное (фильтрация)',
+            # 'СКО расчетное(сглаживание)',
+            '3 СКО расчетное(EKF)',
+            'Ошибка (PF)',
+            # 'СКО действительное (фильтрация)',
+            # 'СКО действительное (сглаживание)',
+            'Ошибка (EKF)'], fontsize='12')
 plt.grid()
 plt.gca().set_xlabel('[М]', fontsize=12)
 plt.gca().set_ylabel('СКО [ед.]', fontsize=12)
