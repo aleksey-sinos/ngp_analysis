@@ -341,7 +341,7 @@ def pf_sim(nav_path):
     P_n_buf, P_f_buf, P_s_buf, P_kf_buf = [], [], [], []
     tau_est_n_buf, tau_est_f_buf, tau_est_s_buf, tau_est_kf_buf = [], [], [], []
 
-    mse_num = 1
+    mse_num = 100
     for mse in range(mse_num):
         print('Итерация', mse + 1)
         seed()
@@ -355,24 +355,26 @@ def pf_sim(nav_path):
 
         # Инициализация навигационных фильтров
 
-        p_number = 5
+        p_number = 1000
         pf_n = PF(p_number)
         pf_n.create_gaussian_particles(0, sg_tau)
         pf_n.estimate()
 
         pf_f = PF(p_number)
         pf_f.create_gaussian_particles(0, sg_tau)
+        pf_f.estimate()
 
         pf_s = PF(p_number)
         pf_s.create_gaussian_particles(0, sg_tau)
+        pf_s.estimate()
 
-        # kf_init
-        F = np.array([1])
-        G = np.array([0])
-        sys = ss(F, G, 1, 0, dt=dt)
-        sys.P0 = sg_tau ** 2
-        kf = KF(sys, sg_tau ** 2, r)
-        kf.estimate()
+        # # kf_init
+        # F = np.array([1])
+        # G = np.array([0])
+        # sys = ss(F, G, 1, 0, dt=dt)
+        # sys.P0 = sg_tau ** 2
+        # kf = KF(sys, sg_tau ** 2, r)
+        # kf.estimate()
 
         print('Интервал измерений в новом подходе', V * dt, "м")
 
@@ -435,22 +437,22 @@ def pf_sim(nav_path):
                 pf_n.estimate()
 
                 # EKF
-                ekf_mnt = map_interp(ns_pos)[1] - mnt
-                kf.predict()
-                kf.update(ekf_mnt, r ** 2, map_interp(ns_pos - kf.x)[2])
-                # kf.update(ekf_mnt, r**2, map_interp(pos)[2])
-                kf.estimate()
+                # ekf_mnt = map_interp(ns_pos)[1] - mnt
+                # kf.predict()
+                # kf.update(ekf_mnt, r ** 2, map_interp(ns_pos - kf.x)[2])
+                # # kf.update(ekf_mnt, r**2, map_interp(pos)[2])
+                # kf.estimate()
 
-                # # с фильтрацией
-                # if np.mod(pos - start_pos, unsample_f) == 0:
-                #     mnt_cnt_f += 1
-                #     pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
-                #     pf_f.estimate()
-                # # со сглаживанием
-                # if np.mod(pos - start_pos, unsample_s) == 0:
-                #     mnt_cnt_s += 1
-                #     pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
-                #     pf_s.estimate()
+                # с фильтрацией
+                if np.mod(pos - start_pos, unsample_f) == 0:
+                    mnt_cnt_f += 1
+                    pf_f.update(mnt_f, P_f_interp(pos), ns_pos, map_interp)
+                    pf_f.estimate()
+                # со сглаживанием
+                if np.mod(pos - start_pos, unsample_s) == 0:
+                    mnt_cnt_s += 1
+                    pf_s.update(mnt_s, P_s_interp(pos), ns_pos, map_interp)
+                    pf_s.estimate()
             if np.mod(i, 100) == 0:
                 print('Шаг', i)
                 # pf.predict(1)
@@ -461,20 +463,20 @@ def pf_sim(nav_path):
                 #     data = data[:, np.argsort(data[0])]
                 #     ax.plot(data[0], np.ones(p_number) * i, zs=data[1], zdir='z')
 
-        err_n = np.abs(tau - np.array(pf_n.mean))
-        err_f = np.abs(tau - np.array(pf_f.mean))
-        err_s = np.abs(tau - np.array(pf_s.mean))
-        err_kf = np.abs(tau - np.array(kf.mean))
+        err_n = (tau - np.array(pf_n.mean)) ** 2
+        err_f = (tau - np.array(pf_f.mean)) ** 2
+        err_s = (tau - np.array(pf_s.mean)) ** 2
+        # err_kf = np.abs(tau - np.array(kf.mean))
 
         err_n_buf.append(err_n)
         err_f_buf.append(err_f)
         err_s_buf.append(err_s)
-        err_kf_buf.append(err_kf)
+        # err_kf_buf.append(err_kf)
 
         P_n_buf.append(pf_n.var)
         P_f_buf.append(pf_f.var)
         P_s_buf.append(pf_s.var)
-        P_kf_buf.append(kf.var)
+        # P_kf_buf.append(kf.var)
 
         # tau_est_n_buf.append(pf_n.mean)
         # tau_est_f_buf.append(pf_f.mean)
@@ -489,18 +491,18 @@ def pf_sim(nav_path):
     err_n_sum = np.sum(err_n_buf, axis=0) / mse_num
     err_f_sum = np.sum(err_f_buf, axis=0) / mse_num
     err_s_sum = np.sum(err_s_buf, axis=0) / mse_num
-    err_kf_sum = np.sum(err_kf_buf, axis=0) / mse_num
+    # err_kf_sum = np.sum(err_kf_buf, axis=0) / mse_num
 
     # расчет средней рассчетной дисперсии ошибки
     P_n_buf = np.array(P_n_buf)
     P_f_buf = np.array(P_f_buf)
     P_s_buf = np.array(P_s_buf)
-    P_kf_buf = np.array(P_kf_buf)
+    # P_kf_buf = np.array(P_kf_buf)
 
     P_n_sum = np.sum(P_n_buf, axis=0) / mse_num
     P_f_sum = np.sum(P_f_buf, axis=0) / mse_num
     P_s_sum = np.sum(P_s_buf, axis=0) / mse_num
-    P_kf_sum = np.sum(P_kf_buf, axis=0) / mse_num
+    # P_kf_sum = np.sum(P_kf_buf, axis=0) / mse_num
 
     # # расчет средней оценки
     # tau_est_n_buf = np.array(tau_est_n_buf)
@@ -526,17 +528,17 @@ def pf_sim(nav_path):
 
     print('Новый подход: среднее СКО tau', np.sqrt(P_n_sum[-1]), 'по', mnt_cnt_n, 'измерениям. Средняя ошибка:',
           err_n_sum[-1], 'м')
-    # print('C предварительной фильтрацией: среднее СКО tau', np.sqrt(P_f_sum[-1]), 'по', mnt_cnt_f,
-    #       'измерениям. Средняя ошибка:', err_f_sum[-1], 'м')
-    # print('C предварительным сглаживанием: среднее СКО tau', np.sqrt(P_s_sum[-1]), 'по', mnt_cnt_s,
-    #       'измерениям. Средняя ошибка:', err_s_sum[-1], 'м')
-    print('EKF: среднее СКО tau', np.sqrt(P_kf_sum[-1]), 'по', mnt_cnt_n,
-          'измерениям. Средняя ошибка:', err_kf_sum[-1], 'м')
+    print('C предварительной фильтрацией: среднее СКО tau', np.sqrt(P_f_sum[-1]), 'по', mnt_cnt_f,
+          'измерениям. Средняя ошибка:', err_f_sum[-1], 'м')
+    print('C предварительным сглаживанием: среднее СКО tau', np.sqrt(P_s_sum[-1]), 'по', mnt_cnt_s,
+          'измерениям. Средняя ошибка:', err_s_sum[-1], 'м')
+    # print('EKF: среднее СКО tau', np.sqrt(P_kf_sum[-1]), 'по', mnt_cnt_n,
+    #       'измерениям. Средняя ошибка:', err_kf_sum[-1], 'м')
 
     nav_path = np.arange(start_pos, start_pos + V * dt * mnt_cnt_n, V * dt)
     nav_path_P = np.arange(start_pos, start_pos + V * dt * mnt_cnt_n + 1, V * dt)
-    nav_path_f = np.arange(start_pos, start_pos + unsample_f * mnt_cnt_f, unsample_f)
-    nav_path_s = np.arange(start_pos, start_pos + unsample_s * mnt_cnt_s, unsample_s)
+    nav_path_f = np.arange(start_pos, start_pos + unsample_f * mnt_cnt_f + 1, unsample_f)
+    nav_path_s = np.arange(start_pos, start_pos + unsample_s * mnt_cnt_s + 1, unsample_s)
 
     # Графики поля
     matplotlib.rcParams.update({'font.size': 16})
@@ -579,24 +581,25 @@ def pf_sim(nav_path):
     # plt.pause(0.001)
 
     plt.figure(2)
-    # plt.plot(nav_path, 3 * np.sqrt(P_n_sum), color='C0')
-    # plt.plot(nav_path_f, np.sqrt(P_f_sum), color='C1')
-    # plt.plot(nav_path_s, np.sqrt(P_s_sum), color='C2')
+    plt.plot(nav_path_P, np.sqrt(P_n_sum), color='C0')
+    plt.plot(nav_path_f, np.sqrt(P_f_sum), color='C1')
+    plt.plot(nav_path_s, np.sqrt(P_s_sum), color='C2')
     # plt.plot(nav_path, 3 * np.sqrt(P_kf_sum.ravel()), color='C3')
 
-    plt.plot(nav_path_P, err_n_sum, linestyle='--', color='C0')
-    # plt.plot(nav_path_f, err_f_sum, linestyle='--', color='C1')
-    # plt.plot(nav_path_s, err_s_sum, linestyle='--', color='C2')
+    plt.plot(nav_path_P, np.sqrt(err_n_sum), linestyle='--', color='C0')
+    plt.plot(nav_path_f, np.sqrt(err_f_sum), linestyle='--', color='C1')
+    plt.plot(nav_path_s, np.sqrt(err_s_sum), linestyle='--', color='C2')
     # plt.plot(nav_path, err_kf_sum.ravel(), linestyle='--', color='C3')
 
-    # plt.legend(['3 СКО расчетное (PF)',
-    #             # 'СКО расчетное (фильтрация)',
-    #             # 'СКО расчетное(сглаживание)',
-    #             '3 СКО расчетное(EKF)',
-    #             'Ошибка (PF)',
-    #             # 'СКО действительное (фильтрация)',
-    #             # 'СКО действительное (сглаживание)',
-    #             'Ошибка (EKF)'], fontsize='12')
+    plt.legend([' СКО расчетное (PF)',
+                'СКО расчетное (фильтрация)',
+                'СКО расчетное(сглаживание)',
+                # ' СКО расчетное(EKF)',
+                'СКО действительное (PF)',
+                'СКО действительное (фильтрация)',
+                'СКО действительное (сглаживание)',
+                # 'Ошибка (EKF)'
+                ], fontsize='12')
     plt.grid()
     plt.gca().set_xlabel('[М]', fontsize=12)
     plt.gca().set_ylabel('СКО [ед.]', fontsize=12)
@@ -625,17 +628,17 @@ nav_path = np.linspace(start_pos, start_pos + mnt_num * V, mnt_num + 1, endpoint
 
 InitModels(smpl, sg_ga=sg_ga, dgdl=dgdl, len=len, dt=dt)
 
-mdl = mdls['Jordan']
+mdl = mdls['M1']
 
 # Подготовка поля и его измерений
-map_v, map_interp = GenerateProfile('Jordan', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
+map_v, map_interp = GenerateProfile('M1', smpl, dgdl=dgdl, len=len, sg_ga=sg_ga, dt=dt, offset=0)
 print("СКО поля:", sg_ga, "мГал.",
       "СКО производной поля:", dgdl, "мГал / м.",
       "СКО ошибки измерений:", r, "мГал.")
 
 pf_sim(nav_path)
-P_crlb = CRLB(map_interp)
+# P_crlb = CRLB(map_interp)
 
-plt.figure(2)
-plt.plot(nav_path, np.sqrt(P_crlb.ravel()), color='C1')
-plt.grid()
+# plt.figure(2)
+# plt.plot(nav_path, np.sqrt(P_crlb.ravel()), color='C1')
+# plt.grid()
